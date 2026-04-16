@@ -17,7 +17,6 @@ build/
 target/
 targett/
 **/*.wasm
-Cargo.lock
 
 # OS
 .DS_Store
