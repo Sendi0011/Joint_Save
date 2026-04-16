@@ -14,8 +14,8 @@ dist/
 build/
 
 # Rust / Cargo build artifacts
-target/
-targett/
+/smartcontract/target/
+/smartcontract/targett/
 **/*.wasm
 
 # OS
