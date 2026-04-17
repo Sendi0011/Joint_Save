@@ -9,7 +9,7 @@
 
 ## Live Demo
 
-🚀 **[https://jointsave.vercel.app](https://jointsave.vercel.app)**
+🚀 **[https://joint-save.vercel.app](https://jointsave.vercel.app)**
 
 ---
 
@@ -87,7 +87,8 @@ Two GitHub Actions workflows are configured:
 - **`test.yml`** – Runs on every push/PR: builds all 4 Soroban contracts and verifies WASM artifacts
 - **`deploy.yml`** – Manual trigger: builds and deploys all contracts to Stellar Testnet
 
-![CI/CD Pipeline](docs/ci-screenshot.png)
+![CI/CD Pipeline Overview](docs/ci-screenshot.png)
+![CI/CD Pipeline Details](docs/ci-screenshot-details.png)
 
 ---
 
@@ -99,7 +100,10 @@ JointSave is fully mobile responsive with:
 - Touch-friendly tab navigation in the dashboard
 - Fluid typography and spacing via Tailwind CSS
 
-![Mobile View](docs/mobile-screenshot.png)
+![Mobile – Landing Page](docs/mobile-screeshot-landing.png)
+![Mobile – How It Works](docs/mobile-screenshot-how-it-works.png)
+![Mobile – Create Savings](docs/mobile-screenshot-create-saving-page.png)
+![Mobile – Group View](docs/mobile-screenshot-group.png)
 
 ---
 
