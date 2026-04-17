@@ -1,7 +1,7 @@
 # JointSave 🌐
 ### Community Savings Circles on Stellar
 
-[![CI – Build & Test Soroban Contracts](https://github.com/YOUR_USERNAME/JointSave/actions/workflows/test.yml/badge.svg)](https://github.com/YOUR_USERNAME/JointSave/actions/workflows/test.yml)
+[![CI – Build & Test Soroban Contracts](https://github.com/Sendi0011/Joint_Save/actions/workflows/test.yml/badge.svg)](https://github.com/Sendi0011/Joint_Save/actions/workflows/test.yml)
 
 **JointSave** is a decentralized community savings platform built on **Stellar**, enabling trusted groups to automate contributions, payouts, and transparency using Soroban smart contracts.
 
@@ -9,7 +9,7 @@
 
 ## Live Demo
 
-🚀 **[https://joint-save.vercel.app](https://jointsave.vercel.app)**
+🚀 **[https://joint-save.vercel.app](https://joint-save.vercel.app)**
 
 ---
 
