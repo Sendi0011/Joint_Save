@@ -27,11 +27,14 @@ interface Pool {
   next_payout?: string
   contract_address: string
   target_amount: number | null
+  contribution_amount: number | null
+  minimum_deposit: number | null
 }
 
 interface PoolWithLive extends Pool {
   liveTotalSaved?: number
   liveProgress?: number
+  progressLabel?: string
 }
 
 interface MyGroupsProps {
@@ -41,27 +44,53 @@ interface MyGroupsProps {
 const container = { hidden: { opacity: 0 }, show: { opacity: 1, transition: { staggerChildren: 0.1 } } }
 const item = { hidden: { opacity: 0, y: 20 }, show: { opacity: 1, y: 0 } }
 
-async function fetchLiveBalance(pool: Pool): Promise<{ totalSaved: number; progress: number }> {
+async function fetchLiveBalance(pool: Pool): Promise<{ totalSaved: number; progress: number; progressLabel: string }> {
   const isPending = !pool.contract_address || pool.contract_address === "pending_deployment"
-  if (isPending) return { totalSaved: pool.total_saved || 0, progress: pool.progress || 0 }
+  if (isPending) return { totalSaved: 0, progress: 0, progressLabel: "Pending deployment" }
 
   try {
     if (pool.type === "rotational") {
-      // Rotational: no single "total saved" — use member count * deposit amount as proxy
-      return { totalSaved: pool.total_saved || 0, progress: pool.progress || 0 }
+      const state = await fetchRotationalState(pool.contract_address)
+      const totalMembers = state.members.length || pool.members_count || 1
+      // Progress = rounds completed / total rounds (one round per member)
+      const progress = Math.min(100, Math.round((state.currentRound / totalMembers) * 100))
+      // Total saved = rounds completed × contribution per member × members
+      const perRound = (pool.contribution_amount || 0) * totalMembers
+      const totalSaved = state.currentRound * perRound
+      return {
+        totalSaved,
+        progress,
+        progressLabel: `Round ${state.currentRound + 1} of ${totalMembers}`,
+      }
     } else if (pool.type === "target") {
       const state = await fetchTargetState(pool.contract_address)
       const saved = stroopsToXlm(state.totalDeposited)
       const target = pool.target_amount || stroopsToXlm(state.targetAmount) || 1
       const progress = Math.min(100, Math.round((saved / target) * 100))
-      return { totalSaved: saved, progress }
+      return {
+        totalSaved: saved,
+        progress,
+        progressLabel: `${saved.toFixed(2)} / ${target.toFixed(2)} XLM`,
+      }
     } else {
+      // Flexible: progress = members who have deposited / total members
       const state = await fetchFlexibleState(pool.contract_address)
-      const saved = stroopsToXlm(state.totalBalance)
-      return { totalSaved: saved, progress: pool.progress || 0 }
+      const totalSaved = stroopsToXlm(state.totalBalance)
+      // Use minimum_deposit as a soft goal per member if available
+      const softGoal = (pool.minimum_deposit || 0) * (pool.members_count || 1)
+      const progress = softGoal > 0
+        ? Math.min(100, Math.round((totalSaved / softGoal) * 100))
+        : state.isActive ? 50 : 100 // active = in progress, inactive = complete
+      return {
+        totalSaved,
+        progress,
+        progressLabel: softGoal > 0
+          ? `${totalSaved.toFixed(2)} / ${softGoal.toFixed(2)} XLM`
+          : `${totalSaved.toFixed(2)} XLM saved`,
+      }
     }
   } catch {
-    return { totalSaved: pool.total_saved || 0, progress: pool.progress || 0 }
+    return { totalSaved: pool.total_saved || 0, progress: pool.progress || 0, progressLabel: "" }
   }
 }
 
@@ -93,7 +122,7 @@ export function MyGroups({ onCreateClick }: MyGroupsProps) {
       const enriched = await Promise.all(
         base.map(async (pool) => {
           const live = await fetchLiveBalance(pool)
-          return { ...pool, liveTotalSaved: live.totalSaved, liveProgress: live.progress }
+          return { ...pool, liveTotalSaved: live.totalSaved, liveProgress: live.progress, progressLabel: live.progressLabel }
         })
       )
       setPools(enriched)
@@ -202,6 +231,9 @@ export function MyGroups({ onCreateClick }: MyGroupsProps) {
                         className="h-full bg-primary"
                       />
                     </div>
+                    {pool.progressLabel && (
+                      <p className="text-xs text-muted-foreground mt-1">{pool.progressLabel}</p>
+                    )}
                   </div>
 
                   <Button className="w-full bg-transparent" variant="outline" asChild>
