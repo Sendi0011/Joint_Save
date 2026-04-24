@@ -11,8 +11,11 @@ import {
 import {
   StellarWalletsKit,
   WalletNetwork,
-  allowAllModules,
   FREIGHTER_ID,
+  FreighterModule,
+  xBullModule,
+  AlbedoModule,
+  LobstrModule,
 } from "@creit.tech/stellar-wallets-kit"
 
 // ── Stellar network config ────────────────────────────────────────────────────
@@ -60,7 +63,12 @@ export function Web3Provider({ children }: { children: ReactNode }) {
     const walletKit = new StellarWalletsKit({
       network: STELLAR_NETWORK,
       selectedWalletId: FREIGHTER_ID,
-      modules: allowAllModules(),
+      modules: [
+        new FreighterModule(),
+        new xBullModule(),
+        new AlbedoModule(),
+        new LobstrModule(),
+      ],
     })
     setKit(walletKit)
 
