@@ -43,6 +43,21 @@ FLEXIBLE_WASM_HASH=$(stellar contract upload \
 echo "Flexible wasm hash: $FLEXIBLE_WASM_HASH"
 
 echo ""
+echo "Initializing factory..."
+# XLM native token contract on Stellar testnet
+NATIVE_TOKEN="CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+DEPLOYER_ADDRESS=$(stellar keys address "$SOURCE" --network "$NETWORK")
+stellar contract invoke \
+  --id "$FACTORY_ID" \
+  --source "$SOURCE" \
+  --network "$NETWORK" \
+  -- initialize \
+  --admin "$DEPLOYER_ADDRESS" \
+  --token "$NATIVE_TOKEN" \
+  --treasury "$DEPLOYER_ADDRESS"
+echo "Factory initialized."
+
+echo ""
 echo "Deployment complete. Update your .env with:"
 echo "NEXT_PUBLIC_FACTORY_CONTRACT_ID=$FACTORY_ID"
 echo "NEXT_PUBLIC_ROTATIONAL_WASM_HASH=$ROTATIONAL_WASM_HASH"
