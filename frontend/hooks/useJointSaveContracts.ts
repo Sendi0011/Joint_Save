@@ -1,257 +1,699 @@
-import { useState, useCallback } from "react"
-import * as StellarSdk from "@stellar/stellar-sdk"
-import { useStellar, STELLAR_RPC_URL, STELLAR_NETWORK_PASSPHRASE } from "@/components/web3-provider"
+"use client"
 
-const FACTORY_CONTRACT_ID =
-  process.env.NEXT_PUBLIC_FACTORY_CONTRACT_ID || ""
+import { useState } from "react"
+import {
+  Contract,
+  TransactionBuilder,
+  Transaction,
+  BASE_FEE,
+  nativeToScVal,
+  Address,
+  xdr,
+  rpc,
+  Operation,
+  StrKey,
+} from "@stellar/stellar-sdk"
+import {
+  useStellar,
+  STELLAR_RPC_URL,
+  STELLAR_NETWORK_PASSPHRASE,
+} from "@/components/web3-provider"
 
-// ── Soroban RPC client ────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-function getRpc() {
-  return new StellarSdk.SorobanRpc.Server(STELLAR_RPC_URL)
+const FACTORY_ID = process.env.NEXT_PUBLIC_FACTORY_CONTRACT_ID!
+const XLM_STROOPS = 10_000_000
+// 5 minutes — enough time for the user to review and sign in their wallet
+const TX_TIMEOUT = 300
+
+const WASM_HASHES: Record<string, string> = {
+  rotational: process.env.NEXT_PUBLIC_ROTATIONAL_WASM_HASH!,
+  target: process.env.NEXT_PUBLIC_TARGET_WASM_HASH!,
+  flexible: process.env.NEXT_PUBLIC_FLEXIBLE_WASM_HASH!,
 }
 
-// ── Helper: sign & submit a transaction ──────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function signAndSubmit(
-  kit: any,
-  address: string,
-  tx: StellarSdk.Transaction
-): Promise<string> {
-  const { signedTxXdr } = await kit.signTransaction(tx.toXDR(), {
+export function getRpc() {
+  return new rpc.Server(STELLAR_RPC_URL)
+}
+
+// Stellar strkeys are case-insensitive but the SDK requires uppercase
+const normalizeId = (id: string) => id.toUpperCase()
+
+const toStroops = (xlm: string): bigint =>
+  BigInt(Math.round(parseFloat(xlm) * XLM_STROOPS))
+
+// Works for both G... account and C... contract addresses
+function addressVal(addr: string): xdr.ScVal {
+  return nativeToScVal(addr.toUpperCase(), { type: "address" })
+}
+
+function i128Val(n: bigint): xdr.ScVal {
+  return nativeToScVal(n, { type: "i128" })
+}
+
+function u32Val(n: number): xdr.ScVal {
+  return nativeToScVal(n, { type: "u32" })
+}
+
+function u64Val(n: bigint): xdr.ScVal {
+  return nativeToScVal(n, { type: "u64" })
+}
+
+function boolVal(b: boolean): xdr.ScVal {
+  return nativeToScVal(b, { type: "bool" })
+}
+
+function vecVal(addrs: string[]): xdr.ScVal {
+  return nativeToScVal(addrs.map((a) => nativeToScVal(a, { type: "address" })))
+}
+
+/** Simulate → assemble → sign → send → poll. Returns tx hash. */
+async function submitTx(kit: any, tx: any): Promise<string> {
+  const server = getRpc()
+
+  const simResult = await server.simulateTransaction(tx)
+  if (rpc.Api.isSimulationError(simResult)) {
+    throw new Error(`Simulation failed: ${simResult.error}`)
+  }
+
+  const preparedTx = rpc.assembleTransaction(tx, simResult).build()
+
+  const { signedTxXdr } = await kit.signTransaction(preparedTx.toXDR(), {
     networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
-    address,
   })
 
-  const rpc = getRpc()
-  const result = await rpc.sendTransaction(
-    StellarSdk.TransactionBuilder.fromXDR(
-      signedTxXdr,
-      STELLAR_NETWORK_PASSPHRASE
-    )
+  const result = await server.sendTransaction(
+    new Transaction(signedTxXdr, STELLAR_NETWORK_PASSPHRASE)
   )
 
   if (result.status === "ERROR") {
-    throw new Error(`Transaction failed: ${result.errorResult}`)
+    throw new Error(`Send failed: ${JSON.stringify(result.errorResult)}`)
   }
 
   // Poll for confirmation
-  let response = await rpc.getTransaction(result.hash)
-  while (response.status === "NOT_FOUND") {
+  let getResult = await server.getTransaction(result.hash)
+  let attempts = 0
+  while (
+    getResult.status === rpc.Api.GetTransactionStatus.NOT_FOUND &&
+    attempts < 30
+  ) {
     await new Promise((r) => setTimeout(r, 1500))
-    response = await rpc.getTransaction(result.hash)
+    getResult = await server.getTransaction(result.hash)
+    attempts++
   }
 
-  if (response.status !== "SUCCESS") {
-    throw new Error("Transaction did not succeed")
+  if (getResult.status === rpc.Api.GetTransactionStatus.FAILED) {
+    throw new Error("Transaction failed on-chain")
   }
 
   return result.hash
 }
 
-// ── Build a contract call transaction ────────────────────────────────────────
+// ── Deploy pool from WASM hash ────────────────────────────────────────────────
 
-async function buildContractTx(
-  address: string,
-  contractId: string,
-  method: string,
-  args: StellarSdk.xdr.ScVal[]
-): Promise<StellarSdk.Transaction> {
-  const rpc = getRpc()
-  const account = await rpc.getAccount(address)
-  const contract = new StellarSdk.Contract(contractId)
-
-  const tx = new StellarSdk.TransactionBuilder(account, {
-    fee: "100000",
-    networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
-  })
-    .addOperation(contract.call(method, ...args))
-    .setTimeout(30)
-    .build()
-
-  const prepared = await rpc.prepareTransaction(tx)
-  return prepared as StellarSdk.Transaction
-}
-
-// ── Address helper ────────────────────────────────────────────────────────────
-
-function addrVal(addr: string) {
-  return StellarSdk.nativeToScVal(addr, { type: "address" })
-}
-
-function i128Val(n: string | number) {
-  return StellarSdk.nativeToScVal(BigInt(n), { type: "i128" })
-}
-
-function u32Val(n: number) {
-  return StellarSdk.nativeToScVal(n, { type: "u32" })
-}
-
-function u64Val(n: number | bigint) {
-  return StellarSdk.nativeToScVal(BigInt(n), { type: "u64" })
-}
-
-function boolVal(b: boolean) {
-  return StellarSdk.nativeToScVal(b, { type: "bool" })
-}
-
-function vecVal(env: any, addrs: string[]) {
-  return StellarSdk.xdr.ScVal.scvVec(
-    addrs.map((a) => addrVal(a))
-  )
-}
-
-// ── Hook factory ─────────────────────────────────────────────────────────────
-
-function useContractCall() {
+export function useDeployPool() {
   const { kit, address } = useStellar()
   const [isLoading, setIsLoading] = useState(false)
-  const [isSuccess, setIsSuccess] = useState(false)
-  const [hash, setHash] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
 
-  const call = useCallback(
-    async (
-      contractId: string,
-      method: string,
-      args: StellarSdk.xdr.ScVal[]
-    ) => {
-      if (!kit || !address) throw new Error("Wallet not connected")
-      setIsLoading(true)
-      setIsSuccess(false)
-      setError(null)
-      try {
-        const tx = await buildContractTx(address, contractId, method, args)
-        const txHash = await signAndSubmit(kit, address, tx)
-        setHash(txHash)
-        setIsSuccess(true)
-        return txHash
-      } catch (e: any) {
-        setError(e.message || "Transaction failed")
-        throw e
-      } finally {
-        setIsLoading(false)
+  const deploy = async (poolType: "rotational" | "target" | "flexible"): Promise<string> => {
+    if (!kit || !address) throw new Error("Wallet not connected")
+    const wasmHash = WASM_HASHES[poolType]
+    if (!wasmHash) throw new Error(`No WASM hash configured for ${poolType}`)
+
+    setIsLoading(true)
+    try {
+      const server = getRpc()
+      const account = await server.getAccount(address)
+      const salt = crypto.getRandomValues(new Uint8Array(32))
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          Operation.createCustomContract({
+            wasmHash: Buffer.from(wasmHash, "hex"),
+            address: new Address(address),
+            salt: Buffer.from(salt),
+          })
+        )
+        .setTimeout(TX_TIMEOUT)
+        .build()
+
+      const simResult = await server.simulateTransaction(tx)
+      if (rpc.Api.isSimulationError(simResult)) {
+        throw new Error(`Deploy simulation failed: ${simResult.error}`)
       }
-    },
-    [kit, address]
-  )
 
-  return { call, isLoading, isSuccess, hash, error }
+      const preparedTx = rpc.assembleTransaction(tx, simResult).build()
+      const { signedTxXdr } = await kit.signTransaction(preparedTx.toXDR(), {
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+
+      const result = await server.sendTransaction(
+        new Transaction(signedTxXdr, STELLAR_NETWORK_PASSPHRASE)
+      )
+      if (result.status === "ERROR") {
+        throw new Error(`Deploy failed: ${JSON.stringify(result.errorResult)}`)
+      }
+
+      // Poll and extract new contract ID from return value
+      let getResult = await server.getTransaction(result.hash)
+      let attempts = 0
+      while (
+        getResult.status === rpc.Api.GetTransactionStatus.NOT_FOUND &&
+        attempts < 30
+      ) {
+        await new Promise((r) => setTimeout(r, 1500))
+        getResult = await server.getTransaction(result.hash)
+        attempts++
+      }
+
+      if (getResult.status === rpc.Api.GetTransactionStatus.FAILED) {
+        throw new Error("Deploy transaction failed on-chain")
+      }
+
+      const success = getResult as rpc.Api.GetSuccessfulTransactionResponse
+      if (!success.returnValue) throw new Error("No return value from deploy")
+      return Address.fromScVal(success.returnValue).toString()
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  return { deploy, isLoading }
+}
+
+// ── Initialize pool contracts ─────────────────────────────────────────────────
+
+export function useInitializePool() {
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
+
+  const initRotational = async (
+    contractId: string,
+    params: {
+      token: string
+      members: string[]
+      depositAmount: string
+      roundDuration: number
+      treasuryFeeBps: number
+      relayerFeeBps: number
+      treasury: string
+    }
+  ): Promise<string> => {
+    if (!kit || !address) throw new Error("Wallet not connected")
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          new Contract(normalizeId(contractId)).call(
+            "initialize",
+            addressVal(params.token),
+            vecVal(params.members),
+            i128Val(toStroops(params.depositAmount)),
+            u64Val(BigInt(params.roundDuration)),
+            u32Val(params.treasuryFeeBps),
+            u32Val(params.relayerFeeBps),
+            addressVal(params.treasury)
+          )
+        )
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const initTarget = async (
+    contractId: string,
+    params: {
+      token: string
+      admin: string
+      members: string[]
+      targetAmount: string
+      deadlineLedger: number
+    }
+  ): Promise<string> => {
+    if (!kit || !address) throw new Error("Wallet not connected")
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          new Contract(normalizeId(contractId)).call(
+            "initialize",
+            addressVal(params.token),
+            addressVal(params.admin),
+            vecVal(params.members),
+            i128Val(toStroops(params.targetAmount)),
+            u32Val(params.deadlineLedger)
+          )
+        )
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const initFlexible = async (
+    contractId: string,
+    params: {
+      token: string
+      members: string[]
+      minimumDeposit: string
+      withdrawalFeeBps: number
+      yieldEnabled: boolean
+      treasury: string
+      treasuryFeeBps: number
+    }
+  ): Promise<string> => {
+    if (!kit || !address) throw new Error("Wallet not connected")
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          new Contract(normalizeId(contractId)).call(
+            "initialize",
+            addressVal(params.token),
+            vecVal(params.members),
+            i128Val(toStroops(params.minimumDeposit)),
+            u32Val(params.withdrawalFeeBps),
+            boolVal(params.yieldEnabled),
+            addressVal(params.treasury),
+            u32Val(params.treasuryFeeBps)
+          )
+        )
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  return { initRotational, initTarget, initFlexible, isLoading }
 }
 
 // ── Register pool with factory ────────────────────────────────────────────────
 
 export function useRegisterPool(poolType: "rotational" | "target" | "flexible") {
-  const { call, isLoading, isSuccess, hash, error } = useContractCall()
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
 
-  const methodMap = {
-    rotational: "register_rotational",
-    target: "register_target",
-    flexible: "register_flexible",
+  const register = async (caller: string, contractId: string): Promise<string> => {
+    if (!kit || !address) throw new Error("Wallet not connected")
+    if (!FACTORY_ID) throw new Error("Factory contract ID not configured")
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const methodMap = {
+        rotational: "register_rotational",
+        target: "register_target",
+        flexible: "register_flexible",
+      }
+      const contractBytes = StrKey.decodeContract(contractId)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          new Contract(normalizeId(FACTORY_ID)).call(
+            methodMap[poolType],
+            addressVal(caller),
+            xdr.ScVal.scvBytes(Buffer.from(contractBytes))
+          )
+        )
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
   }
 
-  const register = useCallback(
-    async (callerAddress: string, poolContractId: string) => {
-      const poolIdBytes = StellarSdk.xdr.ScVal.scvBytes(
-        Buffer.from(poolContractId, "hex")
-      )
-      return call(FACTORY_CONTRACT_ID, methodMap[poolType], [
-        addrVal(callerAddress),
-        poolIdBytes,
-      ])
-    },
-    [call, poolType]
-  )
-
-  return { register, isLoading, isSuccess, hash, error }
+  return { register, isLoading }
 }
 
-// ── Rotational pool ───────────────────────────────────────────────────────────
+// ── Rotational Pool actions ───────────────────────────────────────────────────
 
-export function useRotationalDeposit(poolContractId: string) {
-  const { call, isLoading, isSuccess, hash, error } = useContractCall()
-  const { address } = useStellar()
+export function useRotationalDeposit(contractId: string) {
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
 
-  const deposit = useCallback(async () => {
-    if (!address) throw new Error("Wallet not connected")
-    return call(poolContractId, "deposit", [addrVal(address)])
-  }, [call, poolContractId, address])
+  const deposit = async (): Promise<string | undefined> => {
+    if (!kit || !address || !contractId) return
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(new Contract(normalizeId(contractId)).call("deposit", addressVal(address)))
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
-  return { deposit, isLoading, isSuccess, hash, error }
+  return { deposit, isLoading }
 }
 
-export function useTriggerPayout(poolContractId: string) {
-  const { call, isLoading, isSuccess, hash, error } = useContractCall()
-  const { address } = useStellar()
+export function useTriggerPayout(contractId: string) {
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
 
-  const trigger = useCallback(async () => {
-    if (!address) throw new Error("Wallet not connected")
-    return call(poolContractId, "trigger_payout", [addrVal(address)])
-  }, [call, poolContractId, address])
+  const trigger = async (): Promise<string | undefined> => {
+    if (!kit || !address || !contractId) return
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(new Contract(normalizeId(contractId)).call("trigger_payout", addressVal(address)))
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
-  return { trigger, isLoading, isSuccess, hash, error }
+  return { trigger, isLoading }
 }
 
-// ── Target pool ───────────────────────────────────────────────────────────────
+// ── Target Pool actions ───────────────────────────────────────────────────────
 
-export function useTargetContribute(poolContractId: string, amount: string) {
-  const { call, isLoading, isSuccess, hash, error } = useContractCall()
-  const { address } = useStellar()
+export function useTargetContribute(contractId: string, amount: string) {
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
 
-  const contribute = useCallback(async () => {
-    if (!address) throw new Error("Wallet not connected")
-    const stroops = Math.round(parseFloat(amount) * 1e7).toString()
-    return call(poolContractId, "deposit", [
-      addrVal(address),
-      i128Val(stroops),
-    ])
-  }, [call, poolContractId, address, amount])
+  const contribute = async (): Promise<string | undefined> => {
+    if (!kit || !address || !contractId || !amount) return
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          new Contract(normalizeId(contractId)).call("deposit", addressVal(address), i128Val(toStroops(amount)))
+        )
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
-  return { contribute, isLoading, isSuccess, hash, error }
+  return { contribute, isLoading }
 }
 
-export function useTargetWithdraw(poolContractId: string) {
-  const { call, isLoading, isSuccess, hash, error } = useContractCall()
-  const { address } = useStellar()
+export function useTargetWithdraw(contractId: string) {
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
 
-  const withdraw = useCallback(async () => {
-    if (!address) throw new Error("Wallet not connected")
-    return call(poolContractId, "withdraw", [addrVal(address)])
-  }, [call, poolContractId, address])
+  const withdraw = async (): Promise<string | undefined> => {
+    if (!kit || !address || !contractId) return
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(new Contract(normalizeId(contractId)).call("withdraw", addressVal(address)))
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
-  return { withdraw, isLoading, isSuccess, hash, error }
+  return { withdraw, isLoading }
 }
 
-// ── Flexible pool ─────────────────────────────────────────────────────────────
+export function useTargetRefund(contractId: string) {
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
 
-export function useFlexibleDeposit(poolContractId: string, amount: string) {
-  const { call, isLoading, isSuccess, hash, error } = useContractCall()
-  const { address } = useStellar()
+  const refund = async (): Promise<string | undefined> => {
+    if (!kit || !address || !contractId) return
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(new Contract(normalizeId(contractId)).call("refund", addressVal(address)))
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
 
-  const deposit = useCallback(async () => {
-    if (!address) throw new Error("Wallet not connected")
-    const stroops = Math.round(parseFloat(amount) * 1e7).toString()
-    return call(poolContractId, "deposit", [
-      addrVal(address),
-      i128Val(stroops),
-    ])
-  }, [call, poolContractId, address, amount])
-
-  return { deposit, isLoading, isSuccess, hash, error }
+  return { refund, isLoading }
 }
 
-export function useFlexibleWithdraw(poolContractId: string, amount: string) {
-  const { call, isLoading, isSuccess, hash, error } = useContractCall()
-  const { address } = useStellar()
+// ── Flexible Pool actions ─────────────────────────────────────────────────────
 
-  const withdraw = useCallback(async () => {
-    if (!address) throw new Error("Wallet not connected")
-    const stroops = Math.round(parseFloat(amount) * 1e7).toString()
-    return call(poolContractId, "withdraw", [
-      addrVal(address),
-      i128Val(stroops),
-    ])
-  }, [call, poolContractId, address, amount])
+export function useFlexibleDeposit(contractId: string, amount: string) {
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
 
-  return { withdraw, isLoading, isSuccess, hash, error }
+  const deposit = async (): Promise<string | undefined> => {
+    if (!kit || !address || !contractId || !amount) return
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          new Contract(normalizeId(contractId)).call("deposit", addressVal(address), i128Val(toStroops(amount)))
+        )
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  return { deposit, isLoading }
+}
+
+export function useFlexibleWithdraw(contractId: string, amount: string) {
+  const { kit, address } = useStellar()
+  const [isLoading, setIsLoading] = useState(false)
+
+  const withdraw = async (): Promise<string | undefined> => {
+    if (!kit || !address || !contractId || !amount) return
+    setIsLoading(true)
+    try {
+      const account = await getRpc().getAccount(address)
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          new Contract(normalizeId(contractId)).call("withdraw", addressVal(address), i128Val(toStroops(amount)))
+        )
+        .setTimeout(TX_TIMEOUT)
+        .build()
+      return await submitTx(kit, tx)
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  return { withdraw, isLoading }
+}
+
+// ── On-chain state types ──────────────────────────────────────────────────────
+
+export interface RotationalPoolState {
+  isActive: boolean
+  currentRound: number
+  members: string[]
+  nextPayoutTime: number   // unix timestamp (seconds)
+  hasDeposited: boolean    // for the querying user
+}
+
+export interface TargetPoolState {
+  isUnlocked: boolean
+  totalDeposited: bigint
+  targetAmount: bigint
+  userBalance: bigint
+}
+
+export interface FlexiblePoolState {
+  isActive: boolean
+  totalBalance: bigint
+  userBalance: bigint
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+export function stroopsToXlm(stroops: bigint): number {
+  return Number(stroops) / 10_000_000
+}
+
+/** Fire-and-forget read call — no signing, no fee. */
+async function viewCall(contractId: string, method: string, ...args: xdr.ScVal[]): Promise<xdr.ScVal> {
+  const server = getRpc()
+  // Use a dummy account for simulation — sequence number doesn't matter for reads
+  const dummyAccount = {
+    accountId: () => "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7",
+    sequenceNumber: () => "0",
+    incrementSequenceNumber: () => {},
+  } as any
+
+  const tx = new TransactionBuilder(dummyAccount, {
+    fee: BASE_FEE,
+    networkPassphrase: STELLAR_NETWORK_PASSPHRASE,
+  })
+    .addOperation(new Contract(normalizeId(contractId)).call(method, ...args))
+    .setTimeout(TX_TIMEOUT)
+    .build()
+
+  const sim = await server.simulateTransaction(tx)
+  if (rpc.Api.isSimulationError(sim)) {
+    throw new Error(`View call failed (${method}): ${sim.error}`)
+  }
+  return (sim as rpc.Api.SimulateTransactionSuccessResponse).result!.retval
+}
+
+function scValToBigInt(val: xdr.ScVal): bigint {
+  // i128 / u128 are stored as hi+lo parts
+  if (val.switch().name === "scvI128") {
+    const parts = val.i128()
+    return (BigInt(parts.hi().toString()) << 64n) | BigInt(parts.lo().toString())
+  }
+  if (val.switch().name === "scvU128") {
+    const parts = val.u128()
+    return (BigInt(parts.hi().toString()) << 64n) | BigInt(parts.lo().toString())
+  }
+  if (val.switch().name === "scvU64") return BigInt(val.u64().toString())
+  if (val.switch().name === "scvI64") return BigInt(val.i64().toString())
+  return 0n
+}
+
+function scValToString(val: xdr.ScVal): string {
+  if (val.switch().name === "scvAddress") {
+    return Address.fromScVal(val).toString()
+  }
+  return ""
+}
+
+// ── Read-only state fetchers ──────────────────────────────────────────────────
+
+export async function fetchRotationalState(
+  contractId: string,
+  userAddress?: string
+): Promise<RotationalPoolState> {
+  const [activeVal, roundVal, membersVal, payoutVal] = await Promise.all([
+    viewCall(contractId, "is_active"),
+    viewCall(contractId, "current_round"),
+    viewCall(contractId, "members"),
+    viewCall(contractId, "next_payout_time"),
+  ])
+
+  const members = activeVal.switch().name !== "scvBool"
+    ? []
+    : membersVal.vec()?.map(scValToString) ?? []
+
+  let hasDeposited = false
+  if (userAddress) {
+    try {
+      const depVal = await viewCall(contractId, "has_deposited", addressVal(userAddress))
+      hasDeposited = depVal.switch().name === "scvBool" ? depVal.b() : false
+    } catch {}
+  }
+
+  return {
+    isActive: activeVal.switch().name === "scvBool" ? activeVal.b() : false,
+    currentRound: roundVal.switch().name === "scvU32" ? roundVal.u32() : 0,
+    members,
+    nextPayoutTime: Number(scValToBigInt(payoutVal)),
+    hasDeposited,
+  }
+}
+
+export async function fetchTargetState(
+  contractId: string,
+  userAddress?: string
+): Promise<TargetPoolState> {
+  const [unlockedVal, totalVal, targetVal] = await Promise.all([
+    viewCall(contractId, "is_unlocked"),
+    viewCall(contractId, "total_deposited"),
+    viewCall(contractId, "target_amount"),
+  ])
+
+  let userBalance = 0n
+  if (userAddress) {
+    try {
+      const balVal = await viewCall(contractId, "balance_of", addressVal(userAddress))
+      userBalance = scValToBigInt(balVal)
+    } catch {}
+  }
+
+  return {
+    isUnlocked: unlockedVal.switch().name === "scvBool" ? unlockedVal.b() : false,
+    totalDeposited: scValToBigInt(totalVal),
+    targetAmount: scValToBigInt(targetVal),
+    userBalance,
+  }
+}
+
+export async function fetchFlexibleState(
+  contractId: string,
+  userAddress?: string
+): Promise<FlexiblePoolState> {
+  const [activeVal, totalVal] = await Promise.all([
+    viewCall(contractId, "is_active"),
+    viewCall(contractId, "total_balance"),
+  ])
+
+  let userBalance = 0n
+  if (userAddress) {
+    try {
+      const balVal = await viewCall(contractId, "balance_of", addressVal(userAddress))
+      userBalance = scValToBigInt(balVal)
+    } catch {}
+  }
+
+  return {
+    isActive: activeVal.switch().name === "scvBool" ? activeVal.b() : false,
+    totalBalance: scValToBigInt(totalVal),
+    userBalance,
+  }
 }
