@@ -111,7 +111,7 @@ export function GroupActivity({ groupId }: { groupId: string }) {
 
   const getBlockExplorerUrl = (txHash: string | null) => {
     if (!txHash) return null
-    return `https://sepolia.basescan.org/tx/${txHash}`
+    return `https://stellar.expert/explorer/testnet/tx/${txHash}`
   }
 
   if (loading) {
@@ -183,7 +183,7 @@ export function GroupActivity({ groupId }: { groupId: string }) {
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-2"
                     >
-                      View on BaseScan
+                      View on Stellar Expert
                       <ExternalLink className="h-3 w-3" />
                     </a>
                   )

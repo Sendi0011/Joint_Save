@@ -157,29 +157,39 @@ export async function GET(req: NextRequest) {
 
 export async function PATCH(req: NextRequest) {
   try {
-    const poolId = req.nextUrl.searchParams.get('id')
+    const body = await req.json()
+    const poolId = req.nextUrl.searchParams.get('id') || body.id
 
     if (!poolId) {
-      return NextResponse.json(
-        { error: 'Pool ID required' },
-        { status: 400 }
-      )
+      return NextResponse.json({ error: 'Pool ID required' }, { status: 400 })
     }
 
-    const body = await req.json()
+    // If body contains an `activity` object, log it to pool_activity
+    if (body.activity) {
+      const { activity_type, user_address, amount, tx_hash } = body.activity
+      const { error: actErr } = await supabase.from('pool_activity').insert([{
+        pool_id: poolId,
+        activity_type,
+        user_address: user_address?.toLowerCase() || null,
+        amount: amount || null,
+        tx_hash: tx_hash || null,
+        description: `${activity_type} transaction`,
+      }])
+      if (actErr) console.error('Activity log error:', actErr)
+      return NextResponse.json({ success: true })
+    }
 
+    // Otherwise update pool fields
+    const { id: _id, activity: _activity, ...updateFields } = body
     const { data, error } = await supabase
       .from('pools')
-      .update(body)
+      .update(updateFields)
       .eq('id', poolId)
       .select()
       .single()
 
     if (error) {
-      return NextResponse.json(
-        { error: 'Failed to update pool' },
-        { status: 500 }
-      )
+      return NextResponse.json({ error: 'Failed to update pool' }, { status: 500 })
     }
 
     return NextResponse.json(data)
