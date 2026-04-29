@@ -3,8 +3,9 @@
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
 import { useStellar } from "@/components/web3-provider"
-import { Coins, Menu } from "lucide-react"
+import { Menu } from "lucide-react"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import Image from "next/image"
 
 export function DashboardHeader() {
   const { address, disconnect } = useStellar()
@@ -14,9 +15,13 @@ export function DashboardHeader() {
       <div className="container mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex h-16 items-center justify-between">
           <Link href="/" className="flex items-center gap-2">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary">
-              <Coins className="h-6 w-6 text-primary-foreground" />
-            </div>
+            <Image 
+              src="/jointsave.JPG" 
+              alt="JointSave Logo" 
+              width={40} 
+              height={40}
+              className="h-10 w-10 rounded-lg"
+            />
             <span className="text-xl font-bold">JointSave</span>
           </Link>
 

@@ -11,6 +11,15 @@ export const metadata: Metadata = {
   title: "JointSave - Community Savings on Stellar",
   description:
     "Save together, grow together. Decentralized community savings built on the Stellar blockchain.",
+  icons: {
+    icon: [
+      { url: "/favicon.ico" },
+      { url: "/jointsave-logo.png", sizes: "192x192", type: "image/png" },
+    ],
+    apple: [
+      { url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" },
+    ],
+  },
 }
 
 export default function RootLayout({
